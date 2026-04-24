@@ -17,7 +17,7 @@ SETTINGS
     kafka_topic_list = 'movie-events',
     kafka_group_name = 'clickhouse-movie-events',
     kafka_format = 'AvroConfluent',
-    kafka_schema_registry_url = 'http://schema-registry:8081',
+    format_avro_schema_registry_url = 'http://schema-registry:8081',
     kafka_num_consumers = 1,
     kafka_handle_error_mode = 'stream';
 

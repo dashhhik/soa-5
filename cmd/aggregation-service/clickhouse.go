@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,6 +28,68 @@ func newClickHouseClient(baseURL string) *clickHouseClient {
 
 type chJSONResponse struct {
 	Data []json.RawMessage `json:"data"`
+}
+
+type chInt64 int64
+
+func (n *chInt64) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	if data[0] == '"' {
+		var raw string
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		if raw == "" {
+			*n = 0
+			return nil
+		}
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return err
+		}
+		*n = chInt64(value)
+		return nil
+	}
+	var value int64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*n = chInt64(value)
+	return nil
+}
+
+type chFloat64 float64
+
+func (n *chFloat64) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	if data[0] == '"' {
+		var raw string
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		if raw == "" {
+			*n = 0
+			return nil
+		}
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return err
+		}
+		*n = chFloat64(value)
+		return nil
+	}
+	var value float64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*n = chFloat64(value)
+	return nil
 }
 
 func (c *clickHouseClient) query(ctx context.Context, sql string, dst any) error {
@@ -65,7 +128,7 @@ func decodeCHData(rows []json.RawMessage, dst any) error {
 
 func (c *clickHouseClient) rowsProcessed(ctx context.Context, date time.Time) (int64, error) {
 	var rows []struct {
-		Value int64 `json:"value"`
+		Value chInt64 `json:"value"`
 	}
 	if err := c.query(ctx, fmt.Sprintf(`
 SELECT count() AS value
@@ -80,12 +143,12 @@ WHERE timestamp >= toDateTime64('%s', 3, 'UTC')
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	return rows[0].Value, nil
+	return int64(rows[0].Value), nil
 }
 
 func (c *clickHouseClient) dailyActiveUsers(ctx context.Context, start, end time.Time) (int64, error) {
 	var rows []struct {
-		Value int64 `json:"value"`
+		Value chInt64 `json:"value"`
 	}
 	if err := c.query(ctx, fmt.Sprintf(`
 SELECT uniqExact(user_id) AS value
@@ -100,12 +163,12 @@ WHERE timestamp >= toDateTime64('%s', 3, 'UTC')
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	return rows[0].Value, nil
+	return int64(rows[0].Value), nil
 }
 
 func (c *clickHouseClient) avgWatchTime(ctx context.Context, start, end time.Time) (float64, error) {
 	var rows []struct {
-		Value float64 `json:"value"`
+		Value chFloat64 `json:"value"`
 	}
 	if err := c.query(ctx, fmt.Sprintf(`
 SELECT coalesce(avgIf(progress_seconds, event_type = 'VIEW_FINISHED'), 0) AS value
@@ -120,13 +183,13 @@ WHERE timestamp >= toDateTime64('%s', 3, 'UTC')
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	return rows[0].Value, nil
+	return float64(rows[0].Value), nil
 }
 
 func (c *clickHouseClient) conversion(ctx context.Context, start, end time.Time) (float64, error) {
 	var rows []struct {
-		Finished int64 `json:"finished"`
-		Started  int64 `json:"started"`
+		Finished chInt64 `json:"finished"`
+		Started  chInt64 `json:"started"`
 	}
 	if err := c.query(ctx, fmt.Sprintf(`
 SELECT
@@ -140,7 +203,7 @@ WHERE timestamp >= toDateTime64('%s', 3, 'UTC')
 	), &rows); err != nil {
 		return 0, err
 	}
-	if len(rows) == 0 || rows[0].Started == 0 {
+	if len(rows) == 0 || int64(rows[0].Started) == 0 {
 		return 0, nil
 	}
 	return float64(rows[0].Finished) / float64(rows[0].Started), nil
@@ -148,7 +211,7 @@ WHERE timestamp >= toDateTime64('%s', 3, 'UTC')
 
 type topMovieRow struct {
 	MovieID string `json:"movie_id"`
-	Views   int64  `json:"views"`
+	Views   chInt64 `json:"views"`
 }
 
 func (c *clickHouseClient) topMovies(ctx context.Context, start, end time.Time, limit int) ([]topMovieRow, error) {
@@ -174,7 +237,7 @@ LIMIT %d`,
 
 func (c *clickHouseClient) retention(ctx context.Context, cohortDate time.Time, offset int) (float64, error) {
 	var rows []struct {
-		Value int64 `json:"value"`
+		Value chInt64 `json:"value"`
 	}
 	if err := c.query(ctx, retentionQuery(cohortDate, offset), &rows); err != nil {
 		return 0, err
@@ -195,7 +258,7 @@ func (c *clickHouseClient) retention(ctx context.Context, cohortDate time.Time, 
 
 func (c *clickHouseClient) cohortSize(ctx context.Context, cohortDate time.Time) (int64, error) {
 	var rows []struct {
-		Value int64 `json:"value"`
+		Value chInt64 `json:"value"`
 	}
 	if err := c.query(ctx, fmt.Sprintf(`
 SELECT count() AS value
@@ -212,7 +275,7 @@ FROM (
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	return rows[0].Value, nil
+	return int64(rows[0].Value), nil
 }
 
 func retentionQuery(cohortDate time.Time, offset int) string {
