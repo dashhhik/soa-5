@@ -184,8 +184,8 @@ services:
       - /bin/bash
       - -ec
       - |
-        until cqlsh cassandra-1 9042 -e "DESCRIBE CLUSTER" >/dev/null 2>&1; do sleep 5; done
-        cqlsh cassandra-1 9042 -f /schema/001_schema.cql
+        until cqlsh --request-timeout=60 cassandra-1 9042 -e "DESCRIBE CLUSTER" >/dev/null 2>&1; do sleep 5; done
+        cqlsh --request-timeout=120 cassandra-1 9042 -f /schema/001_schema.cql
     restart: "no"
 
   wms-producer:
