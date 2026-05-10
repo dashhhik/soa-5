@@ -1,4 +1,4 @@
-name: movie-analytics
+name: smart-warehouse
 
 services:
   kafka-1:
@@ -27,8 +27,9 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
-      timeout: 5s
-      retries: 20
+      timeout: 20s
+      start_period: 90s
+      retries: 30
 
   kafka-2:
     image: bitnamilegacy/kafka:3.7.0-debian-12-r7
@@ -56,20 +57,23 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
-      timeout: 5s
-      retries: 20
+      timeout: 20s
+      start_period: 90s
+      retries: 30
 
   kafka-init:
     image: bitnamilegacy/kafka:3.7.0-debian-12-r7
-    entrypoint:
-      - /bin/bash
-      - -ec
-      - kafka-topics.sh --create --if-not-exists --topic movie-events --partitions 3 --replication-factor 2 --bootstrap-server kafka-1:9092
     depends_on:
       kafka-1:
         condition: service_healthy
       kafka-2:
         condition: service_healthy
+    entrypoint:
+      - /bin/bash
+      - -ec
+      - |
+        kafka-topics.sh --create --if-not-exists --topic warehouse-events --partitions 3 --replication-factor 2 --bootstrap-server kafka-1:9092
+        kafka-topics.sh --create --if-not-exists --topic warehouse-events-dlq --partitions 3 --replication-factor 2 --bootstrap-server kafka-1:9092
     restart: "no"
 
   schema-registry:
@@ -86,99 +90,109 @@ services:
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka-1:9092,PLAINTEXT://kafka-2:9092
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: "2"
       SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: PLAINTEXT
-      SCHEMA_REGISTRY_DEBUG: "true"
+    ports:
+      - "8081:8081"
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:8081/subjects >/dev/null"]
       interval: 10s
       timeout: 5s
-      retries: 20
+      retries: 30
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8
-    hostname: clickhouse
+  cassandra-1:
+    image: cassandra:4.1
+    container_name: cassandra-1
+    hostname: cassandra-1
     environment:
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: clickhouse
+      CASSANDRA_CLUSTER_NAME: warehouse-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_SEEDS: cassandra-1
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 100M
     ports:
-      - "8123:8123"
-      - "9002:9000"
+      - "9042:9042"
     volumes:
-      - clickhouse-data:/var/lib/clickhouse
-      - ./infra/clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - cassandra-1-data:/var/lib/cassandra
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' >/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' localhost 9042 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 40
 
-  postgres:
-    image: postgres:16-alpine
-    hostname: postgres
-    environment:
-      POSTGRES_DB: analytics
-      POSTGRES_USER: analytics
-      POSTGRES_PASSWORD: analytics
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U analytics -d analytics"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
-  minio:
-    image: minio/minio:latest
-    hostname: minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio-data:/data
-
-  minio-init:
-    image: minio/mc:latest
+  cassandra-2:
+    image: cassandra:4.1
+    container_name: cassandra-2
+    hostname: cassandra-2
     depends_on:
-      - minio
-    entrypoint: /bin/sh
-    command:
+      cassandra-1:
+        condition: service_healthy
+    environment:
+      CASSANDRA_CLUSTER_NAME: warehouse-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_SEEDS: cassandra-1
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 100M
+    volumes:
+      - cassandra-2-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' localhost 9042 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 40
+
+  cassandra-3:
+    image: cassandra:4.1
+    container_name: cassandra-3
+    hostname: cassandra-3
+    depends_on:
+      cassandra-2:
+        condition: service_healthy
+    environment:
+      CASSANDRA_CLUSTER_NAME: warehouse-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_SEEDS: cassandra-1
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 100M
+    volumes:
+      - cassandra-3-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' localhost 9042 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 40
+
+  cassandra-init:
+    image: cassandra:4.1
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+      cassandra-2:
+        condition: service_healthy
+      cassandra-3:
+        condition: service_healthy
+    volumes:
+      - ./infra/cassandra/init:/schema:ro
+    entrypoint:
+      - /bin/bash
       - -ec
       - |
-        until mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; do
-          sleep 2
-        done
-        mc mb -p local/movie-analytics >/dev/null 2>&1 || true
-        mc anonymous set none local/movie-analytics >/dev/null 2>&1 || true
-        echo "MinIO bucket movie-analytics is ready"
+        until cqlsh --request-timeout=60 cassandra-1 9042 -e "DESCRIBE CLUSTER" >/dev/null 2>&1; do sleep 5; done
+        cqlsh --request-timeout=120 cassandra-1 9042 -f /schema/001_schema.cql
     restart: "no"
 
-  grafana:
-    image: grafana/grafana:11.1.0
-    hostname: grafana
-    depends_on:
-      - clickhouse
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
-
-  movie-producer:
+  wms-producer:
     build:
       context: .
-      dockerfile: cmd/producer/Dockerfile
-    hostname: movie-producer
+      dockerfile: cmd/wms-producer/Dockerfile
+    hostname: wms-producer
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -187,77 +201,95 @@ services:
     environment:
       HTTP_ADDR: ":8080"
       KAFKA_BROKERS: kafka-1:9092,kafka-2:9092
-      KAFKA_TOPIC: movie-events
+      KAFKA_TOPIC: warehouse-events
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
     ports:
-      - "8080:8080"
+      - "${PRODUCER_HOST_PORT:-18080}:8080"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:8080/healthz >/dev/null"]
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health >/dev/null"]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 30
 
-  aggregation-service:
+  wms-consumer:
     build:
       context: .
-      dockerfile: cmd/aggregation-service/Dockerfile
-    hostname: aggregation-service
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
-    environment:
-      HTTP_ADDR: ":8082"
-      CLICKHOUSE_HTTP_URL: http://default:clickhouse@clickhouse:8123
-      POSTGRES_DSN: postgres://analytics:analytics@postgres:5432/analytics?sslmode=disable
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: movie-analytics
-      EXPORT_CRON: 0 3 * * *
-    ports:
-      - "8082:8082"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:8082/healthz >/dev/null"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  tests:
-    build:
-      context: ./tests
-    hostname: tests
+      dockerfile: cmd/wms-consumer/Dockerfile
+    hostname: wms-consumer
     depends_on:
       kafka-init:
         condition: service_completed_successfully
       schema-registry:
         condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      minio-init:
+      cassandra-init:
         condition: service_completed_successfully
-      movie-producer:
+    environment:
+      HTTP_ADDR: ":8081"
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092
+      KAFKA_TOPIC: warehouse-events
+      KAFKA_DLQ_TOPIC: warehouse-events-dlq
+      KAFKA_GROUP_ID: warehouse-state-consumer
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CASSANDRA_HOSTS: cassandra-1,cassandra-2,cassandra-3
+      CASSANDRA_KEYSPACE: warehouse
+    ports:
+      - "${CONSUMER_HOST_PORT:-18081}:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/health >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    hostname: prometheus
+    depends_on:
+      wms-consumer:
         condition: service_healthy
-      aggregation-service:
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    hostname: grafana
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  tests:
+    profiles:
+      - test
+    build:
+      context: ./tests
+    depends_on:
+      wms-producer:
+        condition: service_healthy
+      wms-consumer:
         condition: service_healthy
     environment:
-      PRODUCER_URL: http://movie-producer:8080
-      AGGREGATION_URL: http://aggregation-service:8082
-      CLICKHOUSE_HTTP_URL: http://default:clickhouse@clickhouse:8123
-      POSTGRES_DSN: postgres://analytics:analytics@postgres:5432/analytics?sslmode=disable
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: movie-analytics
+      PRODUCER_URL: http://wms-producer:8080
+      CONSUMER_URL: http://wms-consumer:8081
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092
+      KAFKA_DLQ_TOPIC: warehouse-events-dlq
+      CASSANDRA_HOSTS: cassandra-1
+      CASSANDRA_KEYSPACE: warehouse
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+
 volumes:
   kafka-1-data:
   kafka-2-data:
-  clickhouse-data:
-  postgres-data:
-  minio-data:
+  cassandra-1-data:
+  cassandra-2-data:
+  cassandra-3-data:
   grafana-data:

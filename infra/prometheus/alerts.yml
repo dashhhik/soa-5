@@ -1,0 +1,11 @@
+groups:
+  - name: warehouse-consumer
+    rules:
+      - alert: WarehouseConsumerLagHigh
+        expr: consumer_lag > 5
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: Warehouse consumer lag is above threshold
+          description: "Partition {{ $labels.partition }} has lag {{ $value }}."
